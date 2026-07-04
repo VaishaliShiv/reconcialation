@@ -1,0 +1,22 @@
+# secrets — never commit real credentials
+.env
+*.env
+!.env.example
+
+# python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+*.egg-info/
+
+# local run artifacts
+evidence_log/
+recon_result*.csv
+recon_summary*.json
+*.xlsx
+.~lock*
+
+# os
+.DS_Store
