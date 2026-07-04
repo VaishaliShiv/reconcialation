@@ -70,6 +70,7 @@ def _audit_column(docs: list[dict], col: str) -> dict:
         "col": col, "present": present, "parseable": parseable, "with_time": with_time,
         "coverage": parseable / n if n else 0.0, "distinct": len(days),
         "min": min(days) if days else None, "max": max(days) if days else None,
+        "days": sorted(days),
     }
 
 
@@ -82,6 +83,21 @@ def _print_table(rows: list[dict], n: int) -> None:
         tim = "yes" if r["with_time"] else "no"
         rng = f"{r['min']} … {r['max']}" if r["min"] else "(none parseable)"
         print(f"  {r['col']:<26}{cov:>10}{r['parseable']:>11}{r['distinct']:>10}{tim:>11}   {rng}")
+
+
+def _print_distinct(rows: list[dict], cap: int = 40) -> None:
+    """Print the actual distinct date values held in each date column."""
+    print("\ndistinct date values per column:")
+    for r in sorted(rows, key=lambda x: x["distinct"]):
+        days = r["days"]
+        if not days:
+            print(f"  {r['col']}: (none parseable)")
+            continue
+        shown = days if len(days) <= cap else days[:cap]
+        tail = "" if len(days) <= cap else f"  … (+{len(days) - cap} more)"
+        note = "  <- SAME date for every row (file id)" if r["distinct"] == 1 else ""
+        print(f"  {r['col']} ({r['distinct']} distinct):{note}")
+        print(f"    {', '.join(shown)}{tail}")
 
 
 def _recommend(rows: list[dict], n: int) -> None:
@@ -124,6 +140,7 @@ def main() -> int:
     print(f"  date-like columns found: {date_cols}")
     rows = [_audit_column(docs, c) for c in date_cols]
     _print_table(rows, n)
+    _print_distinct(rows)
     _recommend(rows, n)
 
     # Confirm day-level normalization is actually happening on a column that has time parts.
