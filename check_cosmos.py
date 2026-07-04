@@ -19,11 +19,11 @@ from run_cosmos_workflow import _cols, _query           # noqa: E402
 from bank_reconciliation.config import settings          # noqa: E402
 from bank_reconciliation.schema import canonical_mapper as cmap  # noqa: E402
 
-# Fields the mapper reads. (critical = needed to pass the 4-field validation)
+# Fields the mapper reads. (critical = needed to pass the 3-field validation; Type not required)
 FILE_FIELDS = {
     "Partner_Trn_Reference_No": "ref key", "Payment_Ref_No": "ref key",
-    "DEWA_Trn_Reference_No": "ref key", "Trn_Amount": "critical",
-    "Trn_Date": "critical", "Type": "critical",
+    "DEWATrn_Reference_No": "ref key", "Trn_Amount": "critical",
+    "Trn_Date": "critical",
     "Settlement_Date": "info", "Upload_Date": "file id", "Status": "info", "Details": "info",
 }
 SAP_FIELDS = {

@@ -8,7 +8,8 @@ schema/mapper.py for the standardized file/SAP formats. No LLM — it's money ma
   paymentreferencenumber, dewatransactionid, amount, currency, status,
   reconflag, remarks).
 - source_channel / bank name is injected from the vendor code (not in either feed).
-- Validate only 4 fields (≥1 ref key, amount, date, type) -> else invalid_record.
+- Validate only 3 fields (≥1 ref key, amount, date) -> else invalid_record.
+  (Type is read for reporting but is NOT required — it may be absent in this feed.)
 """
 from __future__ import annotations
 
@@ -93,16 +94,18 @@ def parse_date(v) -> date | None:
 
 
 def map_bank_file(rows: list[dict], vendor_code: str) -> list[CanonicalTxn]:
-    """Normalize standard bank-file attribute rows. Marks invalid rows (4-field check)."""
+    """Normalize standard bank-file attribute rows. Marks invalid rows (3-field check)."""
     src = VENDOR_SOURCE.get(vendor_code, vendor_code)
     out: list[CanonicalTxn] = []
     for row in rows:
         partner = _norm_key(row.get("Partner_Trn_Reference_No"))
         payment = _norm_key(row.get("Payment_Ref_No"))
-        dewa = _norm_key(row.get("DEWA_Trn_Reference_No"))
+        # live Cosmos column is 'DEWATrn_Reference_No' (no underscore); accept the
+        # underscored spelling too so either standardized feed still joins.
+        dewa = _norm_key(row.get("DEWATrn_Reference_No") or row.get("DEWA_Trn_Reference_No"))
         amount = _amount(row.get("Trn_Amount"))
         txn_date = parse_date(row.get("Trn_Date"))
-        ttype = _s(row.get("Type"))
+        ttype = _s(row.get("Type"))  # kept for reporting only — NOT a validation gate
 
         reasons: list[str] = []
         if not (partner or payment or dewa):
@@ -111,8 +114,6 @@ def map_bank_file(rows: list[dict], vendor_code: str) -> list[CanonicalTxn]:
             reasons.append("unparseable amount")
         if txn_date is None:
             reasons.append("unparseable date")
-        if not ttype:
-            reasons.append("missing type")
 
         if partner:
             mk, kind = partner, "partner"
