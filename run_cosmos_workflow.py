@@ -9,11 +9,17 @@ reconflag/remarks back into the SAP docs, and (optionally) upserts the run summa
 DATE (optional): email/upload day 'YYYY-MM-DD'. Used as the summary id (VENDOR:DATE) and
 the idempotency guard. If omitted, it is derived from the file rows' Upload_Date.
 
-Flags — ALL WRITES ARE OPT-IN. Default = READ-ONLY dry run (writes NOTHING):
+Flags:
     --write-sap       upsert reconflag + remarks into the SAP docs (bank-sap-source)
     --write-summary   upsert the summary doc to COSMOS_RESULTS_CONTAINER  (written LAST)
+    --dry-run         force a NO-WRITE run even if WRITE_SAP/WRITE_SUMMARY are on in .env
     --all-sap         don't date-scope SAP; use every SAP row for the vendor
     --force           ignore the "summary already exists" idempotency guard
+
+Writes turn on EITHER via these flags OR by setting WRITE_SAP=true / WRITE_SUMMARY=true in
+.env (so the plain `python run_cosmos_workflow.py VENDOR` writes by itself). If BOTH are
+false/unset and no flag is passed, the run is a READ-ONLY dry run (writes NOTHING). Use
+--dry-run any time you want to preview safely regardless of the .env defaults.
 
 SAFE FIRST TEST: run with NO flags. It prints the live column names of both containers
 and the full reconciliation, and writes nothing — so you can confirm the field names and
@@ -140,12 +146,16 @@ def main() -> int:
     positional = [a for a in args if not a.startswith("-")]
     vendor = positional[0] if positional else "MBANK"
     arg_date = positional[1] if len(positional) > 1 else ""
-    flags = ("--write-sap" in args, "--write-summary" in args,
-             "--all-sap" in args, "--force" in args)
+    # Writes turn on via .env (WRITE_SAP / WRITE_SUMMARY) OR the CLI flag; --dry-run forces off.
+    dry_run = "--dry-run" in args
+    write_sap = (settings.write_sap or "--write-sap" in args) and not dry_run
+    write_summary = (settings.write_summary or "--write-summary" in args) and not dry_run
+    flags = (write_sap, write_summary, "--all-sap" in args, "--force" in args)
 
     print(f"VENDOR={vendor}  DATE={arg_date or '(all files in container)'}  "
           f"triage={'on' if settings.triage_enabled else 'off'}  "
-          f"write_sap={flags[0]}  write_summary={flags[1]}\n")
+          f"write_sap={write_sap}  write_summary={write_summary}"
+          f"{'  [--dry-run: writes forced OFF]' if dry_run else ''}\n")
 
     # read the whole email container once, map to canonical, then SPLIT INTO FILES
     file_docs = _query(settings.cosmos_file_container, "SELECT * FROM c", [])

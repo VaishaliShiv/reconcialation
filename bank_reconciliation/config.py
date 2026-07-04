@@ -28,6 +28,11 @@ class Settings(BaseSettings):
     sap_write_enabled: bool = False
     sap_write_api_base: str = ""    # falls back to sap_api_base if empty
 
+    # Cosmos write-back defaults for run_cosmos_workflow. When true, the plain command
+    # writes WITHOUT needing --write-sap/--write-summary. Pass --dry-run to force no writes.
+    write_sap: bool = False
+    write_summary: bool = False
+
     # mode
     source_mode: str = "fixture"  # fixture | cosmos
 
