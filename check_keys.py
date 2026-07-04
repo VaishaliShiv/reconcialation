@@ -28,6 +28,26 @@ def _values(docs: list[dict], col: str) -> set[str]:
     return {v for v in (_norm_key(d.get(col)) for d in docs) if v}
 
 
+def _samples(docs: list[dict], col: str, n: int = 5) -> list[str]:
+    """A few RAW (un-normalized) non-null values — to eyeball format drift."""
+    out = []
+    for d in docs:
+        v = d.get(col)
+        if v is not None and str(v).strip():
+            out.append(repr(str(v)))
+            if len(out) >= n:
+                break
+    return out
+
+
+def _print_samples(email_docs: list[dict], sap_docs: list[dict]) -> None:
+    print("\nsample RAW values (compare formats — prefixes, leading zeros, number vs text):")
+    for c in EMAIL_KEYS:
+        print(f"  email.{c:<26} {_samples(email_docs, c)}")
+    for c in SAP_KEYS:
+        print(f"  sap.{c:<28} {_samples(sap_docs, c)}")
+
+
 def _matrix(email_docs: list[dict], sap_docs: list[dict]) -> None:
     ev = {c: _values(email_docs, c) for c in EMAIL_KEYS}
     sv = {c: _values(sap_docs, c) for c in SAP_KEYS}
@@ -77,6 +97,7 @@ def main() -> int:
         print("  (need docs on both sides to compare)")
         return 1
     _matrix(email_docs, sap_docs)
+    _print_samples(email_docs, sap_docs)
     return 0
 
 
