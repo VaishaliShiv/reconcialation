@@ -36,7 +36,6 @@ from __future__ import annotations
 import json
 import pathlib
 import sys
-from collections import defaultdict
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
@@ -46,6 +45,7 @@ from bank_reconciliation.schema import canonical_mapper as cmap       # noqa: E4
 from bank_reconciliation.triage import enrich_anomalies, run_summary  # noqa: E402
 
 ROOT = pathlib.Path(__file__).resolve().parent
+FIXTURE_DIR = ROOT / "fixtures"
 
 
 def _cosmos_container(name: str):
@@ -54,7 +54,18 @@ def _cosmos_container(name: str):
     return client.get_database_client(settings.cosmos_database).get_container_client(name)
 
 
+def _fixture_docs(container_name: str) -> list[dict]:
+    """SOURCE_MODE=fixture: read a container's docs from local fixtures/ (no Cosmos)."""
+    fmap = {settings.cosmos_file_container: "email_files.json",
+            settings.cosmos_sap_container: "sap_read.json"}
+    name = fmap.get(container_name)
+    path = FIXTURE_DIR / name if name else None
+    return json.loads(path.read_text()) if path and path.exists() else []
+
+
 def _query(container_name: str, sql: str, params: list[dict]) -> list[dict]:
+    if settings.source_mode == "fixture":            # offline test: local JSON, no Cosmos
+        return _fixture_docs(container_name)
     return list(_cosmos_container(container_name).query_items(
         query=sql, parameters=params, enable_cross_partition_query=True, max_item_count=1000))
 
@@ -131,6 +142,8 @@ def _sap_datevalue(doc: dict) -> str | None:
 
 
 def _summary_exists_id(doc_id: str, vendor: str) -> bool:
+    if settings.source_mode == "fixture":            # no idempotency guard offline
+        return False
     try:
         _cosmos_container(settings.cosmos_results_container).read_item(
             item=doc_id, partition_key=vendor)
@@ -140,18 +153,24 @@ def _summary_exists_id(doc_id: str, vendor: str) -> bool:
 
 
 def _write_sap_doc(sap_doc: dict, rows: list[dict]) -> int:
-    """Fill reconflag+remarks into a SAP READ doc's transaction[] and upsert the whole doc."""
+    """Fill reconflag+remarks into a SAP READ doc's transaction[] (in place). Upsert to
+    Cosmos in cosmos mode; in fixture mode the mutation is persisted to sap_read.json by main()."""
     filled, n = sap_writeback.fill_sap_read(sap_doc, rows)
-    if n and filled.get("id"):
+    if n and filled.get("id") and settings.source_mode != "fixture":
         clean = {k: v for k, v in filled.items() if not k.startswith("_")}
         _cosmos_container(settings.cosmos_sap_container).upsert_item(clean)
     return n
 
 
 def _process_email_file(doc: dict, vendor_filter: str | None, sap_index: dict,
-                        flags: tuple[bool, bool, bool, bool]) -> str:
-    """Reconcile ONE email FILE vs its paired SAP READ doc; opt-in write-back + summary."""
+                        flags: tuple[bool, bool, bool, bool]) -> tuple[str, dict | None]:
+    """Reconcile ONE email FILE vs its paired SAP READ doc; opt-in write-back + summary.
+
+    Returns (outcome, summary_doc). In fixture mode the SAP mutation + summary are persisted
+    to local files by main(); in cosmos mode they are upserted here.
+    """
     write_sap, write_summary, all_sap, force = flags
+    is_fixture = settings.source_mode == "fixture"
     filename, vendor, upload, txns = cmap.map_email_doc(doc, vendor_filter)
     active = [t for t in txns if (t.status or "").lower() != "completed"]   # skip Completed
     skipped = len(txns) - len(active)
@@ -174,18 +193,19 @@ def _process_email_file(doc: dict, vendor_filter: str | None, sap_index: dict,
     if rows and invalid / len(rows) > 0.2:
         print(f"⚠️  {invalid}/{len(rows)} rows invalid_record — likely a FIELD-NAME mismatch. "
               f"Skipping this file (no writes).")
-        return "error"
+        return "error", None
 
     enrich_anomalies(rows)                            # AI only if TRIAGE_ENABLED; else deterministic
     summary_text = run_summary.summarize(rows, snap, vendor, date)
 
     if write_summary and not force and filename and _summary_exists_id(filename, vendor):
         print(f"summary '{filename}' already exists — skipping (use --force to reprocess).")
-        return "skipped"
+        return "skipped", None
 
     if write_sap:
         total = sum(_write_sap_doc(sd, rows) for sd in sap_docs)
-        print(f"SAP write-back: reconflag+remarks written into {total} SAP txn(s).")
+        dest = "fixtures/sap_read.json" if is_fixture else "SAP docs"
+        print(f"SAP write-back: reconflag+remarks written into {total} SAP txn(s) ({dest}).")
     else:
         preview = sap_writeback.build_write_payload(rows, vendor, date)
         print(f"[DRY-RUN] SAP write-back would fill {len(preview['transaction'])} txn(s) "
@@ -193,13 +213,15 @@ def _process_email_file(doc: dict, vendor_filter: str | None, sap_index: dict,
 
     sdoc = sap_writeback.build_summary(vendor, run_id, date=date,
                                        summary_text=summary_text, filename=filename)
-    if write_summary:
+    if write_summary and is_fixture:
+        print(f"summary (fixture) id={sdoc['id']} -> fixtures/summary_container.json")
+    elif write_summary:
         print(f"summary upserted to '{settings.cosmos_results_container}': "
               f"id={summary_store.upsert(sdoc)}")
     else:
         print("[DRY-RUN] summary doc (pass --write-summary to upsert):")
         print(json.dumps(sdoc, indent=2, default=str, ensure_ascii=False))
-    return "processed"
+    return "processed", sdoc
 
 
 # ---- OLD FORMAT main() (flat rows grouped by Upload_Date) — commented for reference ----
@@ -269,9 +291,22 @@ def main() -> int:
              or cmap._s(d.get("vendorId")) == vendor_filter]
     print(f"\nprocessing {len(files)} email file(s)")
     tally: dict[str, int] = {}
+    summaries: list[dict] = []
     for doc in files:
-        outcome = _process_email_file(doc, vendor_filter, sap_index, flags)
+        outcome, sdoc = _process_email_file(doc, vendor_filter, sap_index, flags)
         tally[outcome] = tally.get(outcome, 0) + 1
+        if sdoc and write_summary:
+            summaries.append(sdoc)
+
+    # fixture mode: persist the in-place SAP mutations + summaries to local files (no Cosmos)
+    if settings.source_mode == "fixture":
+        if write_sap:
+            (FIXTURE_DIR / "sap_read.json").write_text(json.dumps(sap_docs, indent=2, default=str) + "\n")
+            print("\nwrote reconflag/remarks back into fixtures/sap_read.json (in place)")
+        if write_summary and summaries:
+            (FIXTURE_DIR / "summary_container.json").write_text(json.dumps(summaries, indent=2, default=str) + "\n")
+            print("wrote summaries to fixtures/summary_container.json")
+
     print(f"\n===== DONE. files -> {tally} =====")
     return 1 if tally.get("error") else 0
 
