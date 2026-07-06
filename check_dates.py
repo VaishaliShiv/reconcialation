@@ -20,6 +20,7 @@ import sys
 from run_cosmos_workflow import _query                       # noqa: E402
 from bank_reconciliation.config import settings              # noqa: E402
 from bank_reconciliation.schema.canonical_mapper import parse_date  # noqa: E402
+import check_common as cc                                    # noqa: E402
 
 
 def _all_keys(docs: list[dict]) -> list[str]:
@@ -129,11 +130,12 @@ def main() -> int:
     print(f"READ-ONLY date audit — VENDOR={vendor}  SOURCE_MODE={settings.source_mode}")
     print("(this writes NOTHING)\n")
 
-    docs = _query(settings.cosmos_file_container, "SELECT * FROM c", [])
+    file_docs = _query(settings.cosmos_file_container, "SELECT * FROM c", [])
+    docs = cc.email_txn_rows(file_docs)          # flatten transactions[] (+ uploadDate injected)
     n = len(docs)
-    print(f"file container '{settings.cosmos_file_container}': {n} docs")
+    print(f"file container '{settings.cosmos_file_container}': {len(file_docs)} file(s) -> {n} txns")
     if not docs:
-        print("  (no docs — nothing to audit)")
+        print("  (no transactions — nothing to audit)")
         return 1
 
     date_cols = _date_columns(docs, _all_keys(docs))

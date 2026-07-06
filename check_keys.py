@@ -5,10 +5,11 @@ sides store the same id in DIFFERENT columns, nothing matches. This tool compare
 email ref-column against EVERY SAP ref-column across the whole dataset and prints how many
 values overlap — so the true join pair is obvious (the cell with the high overlap).
 
-    python check_keys.py MBANK
+    python check_keys.py [VENDOR_ID]
 
-High overlap on a pair (e.g. email.Payment_Ref_No <-> SAP.paymentreferencenumber) = that's
-the column pair the matcher should join on.
+High overlap on a pair (e.g. email.paymentRefNo <-> SAP.paymentreferencenumber) = that's
+the column pair the matcher should join on. NEW nested format: email transactions live in
+a transactions[] array; SAP in a transaction[] array — both are flattened first.
 """
 from __future__ import annotations
 
@@ -17,9 +18,11 @@ import sys
 from run_cosmos_workflow import _query                       # noqa: E402
 from bank_reconciliation.config import settings              # noqa: E402
 from bank_reconciliation.schema.canonical_mapper import _norm_key  # noqa: E402
+import check_common as cc                                    # noqa: E402
 
 # candidate reference/join columns on each side (the fields the matcher can key on)
-EMAIL_KEYS = ["Partner_Trn_Reference_No", "Payment_Ref_No", "DEWATrn_Reference_No"]
+# OLD flat email cols: ["Partner_Trn_Reference_No", "Payment_Ref_No", "DEWATrn_Reference_No"]
+EMAIL_KEYS = ["partnerTrnReferenceNo", "paymentRefNo", "dewaTrnReferenceNo"]
 SAP_KEYS = ["partnertransactionid", "paymentreferencenumber", "dewatransactionid"]
 
 
@@ -91,13 +94,15 @@ def main() -> int:
                       "SELECT * FROM c WHERE c.vendorid=@v", [{"name": "@v", "value": vendor}])
     if not sap_docs:
         sap_docs = _query(settings.cosmos_sap_container, "SELECT * FROM c", [])
-    print(f"email-source '{settings.cosmos_file_container}': {len(email_docs)} docs")
-    print(f"SAP          '{settings.cosmos_sap_container}': {len(sap_docs)} docs")
-    if not email_docs or not sap_docs:
-        print("  (need docs on both sides to compare)")
+    email_rows = cc.email_txn_rows(email_docs)   # flatten transactions[] / transaction[]
+    sap_rows = cc.sap_txn_rows(sap_docs)
+    print(f"email-source '{settings.cosmos_file_container}': {len(email_docs)} file(s) -> {len(email_rows)} txns")
+    print(f"SAP          '{settings.cosmos_sap_container}': {len(sap_docs)} doc(s) -> {len(sap_rows)} txns")
+    if not email_rows or not sap_rows:
+        print("  (need transactions on both sides to compare)")
         return 1
-    _matrix(email_docs, sap_docs)
-    _print_samples(email_docs, sap_docs)
+    _matrix(email_rows, sap_rows)
+    _print_samples(email_rows, sap_rows)
     return 0
 
 

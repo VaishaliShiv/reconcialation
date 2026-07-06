@@ -14,9 +14,8 @@ This is a diagnostic/test helper — it never writes reconflag, remarks, or summ
 from __future__ import annotations
 
 import sys
-from collections import defaultdict
 
-from run_cosmos_workflow import _query                       # noqa: E402
+from run_cosmos_workflow import _query, _sap_datevalue       # noqa: E402
 from bank_reconciliation.config import settings              # noqa: E402
 from bank_reconciliation.schema import canonical_mapper as cmap  # noqa: E402
 from bank_reconciliation.recon.dynamic_matcher import reconcile  # noqa: E402
@@ -40,44 +39,41 @@ def _print_side(rows: list[dict], mt: MatchType, amt_key: str, date_key: str, la
     return len(hits)
 
 
-def _scope_sap(file_group: list, sap_all: list, all_sap: bool) -> list:
-    """Mirror run_cosmos_workflow: SAP scoped to this file's txn dates unless --all-sap."""
-    if all_sap:
-        return sap_all
-    active = [t for t in file_group if (t.status or "").lower() != "completed"]
-    it_date = {t.txn_date.isoformat() for t in active if t.txn_date}
-    return [t for t in sap_all if t.txn_date and t.txn_date.isoformat() in it_date]
-
-
 def main() -> int:
     args = sys.argv[1:]
     all_sap = "--all-sap" in args
-    vendor = next((a for a in args if not a.startswith("-")), "MBANK")
-    print(f"READ-ONLY unmatched-ref probe — VENDOR={vendor}  SOURCE_MODE={settings.source_mode}"
-          f"  all_sap={all_sap}\n(this writes NOTHING)\n")
+    vendor_filter = next((a for a in args if not a.startswith("-")), None)
+    print(f"READ-ONLY unmatched-ref probe — VENDOR={vendor_filter or 'ALL'}  "
+          f"SOURCE_MODE={settings.source_mode}  all_sap={all_sap}\n(this writes NOTHING)\n")
 
-    file_docs = _query(settings.cosmos_file_container, "SELECT * FROM c", [])
-    sap_docs = _query(settings.cosmos_sap_container,
-                      "SELECT * FROM c WHERE c.vendorid=@v", [{"name": "@v", "value": vendor}])
-    print(f"email-source '{settings.cosmos_file_container}': {len(file_docs)} docs")
-    print(f"SAP          '{settings.cosmos_sap_container}': {len(sap_docs)} docs (vendor={vendor})")
-    if not file_docs and not sap_docs:
+    email_docs = _query(settings.cosmos_file_container, "SELECT * FROM c", [])
+    sap_docs = _query(settings.cosmos_sap_container, "SELECT * FROM c", [])
+    print(f"email-source '{settings.cosmos_file_container}': {len(email_docs)} file(s)")
+    print(f"SAP          '{settings.cosmos_sap_container}': {len(sap_docs)} doc(s)")
+    if not email_docs and not sap_docs:
         print("  (nothing to compare)")
         return 1
 
-    file_txns = cmap.map_bank_file(file_docs, vendor)
-    sap_all = cmap.map_sap_txns(sap_docs)
-
-    groups: dict[str, list] = defaultdict(list)
-    for t in file_txns:
-        groups[t.upload_date.isoformat() if t.upload_date else "(no Upload_Date)"].append(t)
+    # index each SAP READ doc by (vendorid, datevalue) so a file pairs to its SAP doc
+    sap_index: dict = {}
+    for d in sap_docs:
+        sap_index[(cmap._s(d.get("vendorid")), _sap_datevalue(d))] = d
 
     total_no_sap = total_no_file = 0
-    for date in sorted(groups):
-        file_group = groups[date]
-        sap_txns = _scope_sap(file_group, sap_all, all_sap)
-        rows = reconcile(file_group, sap_txns)
-        print(f"\n===== FILE {vendor}:{date}  file_rows={len(file_group)}  sap_compared={len(sap_txns)} =====")
+    for doc in email_docs:
+        filename, vendor, upload, txns = cmap.map_email_doc(doc, vendor_filter)
+        if vendor_filter and vendor_filter.upper() != "ALL" and vendor != vendor_filter:
+            continue
+        active = [t for t in txns if (t.status or "").lower() != "completed"]   # skip Completed
+        datevalue = (upload.isoformat().replace("-", "")) if upload else ""
+        if all_sap:
+            paired = [d for (v, _dv), d in sap_index.items() if v == vendor]
+        else:
+            paired = [sap_index[(vendor, datevalue)]] if (vendor, datevalue) in sap_index else []
+        sap_txns = cmap.map_sap_read(paired)
+        rows = reconcile(active, sap_txns)
+        print(f"\n===== FILE {filename}  vendor={vendor}  uploadDate={upload}  "
+              f"active={len(active)}  sap_compared={len(sap_txns)} =====")
         total_no_sap += _print_side(rows, MatchType.MISSING_IN_SAP,
                                      "file_amount", "date_source", "in EMAIL but NOT in SAP (missing_in_sap)")
         total_no_file += _print_side(rows, MatchType.MISSING_IN_FILE,
