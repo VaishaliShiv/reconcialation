@@ -13,11 +13,14 @@ from collections import defaultdict
 from ..models import CanonicalTxn, MatchType
 
 
+# OLD (tolerant): a missing date on either side was treated as NOT a mismatch.
+# def _same_day(a, b) -> bool:
+#     if a is None or b is None:
+#         return True
+#     return a == b
 def _same_day(a, b) -> bool:
-    """Day-level compare. Missing date on either side -> not a mismatch."""
-    if a is None or b is None:
-        return True
-    return a == b
+    """STRICT day-level compare: BOTH sides must carry a date and it must be the same day."""
+    return a is not None and b is not None and a == b
 
 
 def _row(f: CanonicalTxn | None, sap_rows: list[CanonicalTxn], mt: MatchType,
@@ -170,6 +173,10 @@ def reconcile(file_txns: list[CanonicalTxn], sap_txns: list[CanonicalTxn],
             results.append(_row(t, full, MatchType.DUPLICATE))
             continue
         s = full[0]
+        if id(s) in matched_sap:          # SAP row already consumed by an earlier file row
+            results.append(_row(t, [s], MatchType.DUPLICATE,
+                                note="duplicate in bank file (same reference)"))
+            continue
         matched_sap.add(id(s))
         sap_amt = round(s.amount or 0, 2)
         if round(t.amount or 0, 2) != sap_amt:

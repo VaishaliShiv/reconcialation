@@ -86,10 +86,15 @@ Otherwise it is classified as one of the outcomes below.
   records have no SAP row, so they are reported in the summary but not written to SAP.
 - `missing_in_file` records **do** exist in SAP, so they are stamped `ANOMALY` / "Not in bank file".
 
-## Notes / open points
+## Notes
 
-- **Missing date on one side:** currently tolerated (a blank date does not block a match).
-  Change to strict (blank date = anomaly) only if the business requires it.
-- **Precedence vs AND:** the rule above is the AND rule (all email-present references must
-  agree). The join first pairs records on any shared reference, then validates that every
+- **Date is strict:** BOTH sides must carry a date and it must be the same day. A blank
+  date on either side → `date_mismatch` (it does NOT pass as matched).
+- **Duplicates (both directions):**
+  - More than one SAP row for the same reference → `duplicate` (SAP-side).
+  - More than one EMAIL row matching the same SAP row (same reference twice in the file) →
+    the first is `matched`, each later one is `duplicate` — catches double-submissions in
+    the bank file.
+- **Precedence vs AND:** the rule is the AND rule (all email-present references must agree).
+  The join first pairs records on any shared reference, then validates that every
   email-present reference agrees.
