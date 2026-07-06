@@ -4,10 +4,13 @@ Reads the bank file + SAP from Cosmos, runs the deterministic compare, (optional
 TRIAGE_ENABLED=true) adds AI explanation + AI run-summary text, (optionally) writes
 reconflag/remarks back into the SAP docs, and (optionally) upserts the run summary doc.
 
-    python run_cosmos_workflow.py VENDOR [DATE] [flags]
+    python run_cosmos_workflow.py [VENDOR_ID | ALL] [flags]
 
-DATE (optional): email/upload day 'YYYY-MM-DD'. Used as the summary id (VENDOR:DATE) and
-the idempotency guard. If omitted, it is derived from the file rows' Upload_Date.
+NEW nested format: each email doc is one FILE (top-level vendorId/uploadDate/id + a
+transactions[] array). It is paired to the SAP READ doc (transaction[] array) by
+(vendorId, uploadDate=datevalue). The summary id IS the file name (the email doc's id).
+With no arg (or ALL) every email file is processed; a VENDOR_ID limits to that vendor.
+Email transactions with status 'Completed' are skipped; 'In Progress'/blank are processed.
 
 Flags:
     --write-sap       upsert reconflag + remarks into the SAP docs (bank-sap-source)
@@ -69,41 +72,102 @@ def _summary_exists(vendor: str, date: str) -> bool:
         return False
 
 
-def _write_sap_reconflag(rows: list[dict], sap_docs: list[dict]) -> int:
-    """Upsert reconflag + remarks into each SAP doc, matched on partner/payment/dewa id."""
-    lookup = sap_writeback._key_to_flag_remark(rows)
-    cont = _cosmos_container(settings.cosmos_sap_container)
-    n = 0
-    for doc in sap_docs:
-        key = (cmap._norm_key(doc.get("partnertransactionid"))
-               or cmap._norm_key(doc.get("paymentreferencenumber"))
-               or cmap._norm_key(doc.get("dewatransactionid")))
-        hit = lookup.get(key)
-        if not hit or not doc.get("id"):
-            continue
-        clean = {k: v for k, v in doc.items() if not k.startswith("_")}
-        clean["reconflag"], clean["remarks"] = hit
-        cont.upsert_item(clean)
-        n += 1
+# ============================================================================
+# OLD FORMAT (flat email rows grouped by Upload_Date; flat SAP docs) — REPLACED
+# by the nested per-file flow below. Kept commented for reference / rollback.
+# ============================================================================
+# def _write_sap_reconflag(rows: list[dict], sap_docs: list[dict]) -> int:
+#     """Upsert reconflag + remarks into each SAP doc, matched on partner/payment/dewa id."""
+#     lookup = sap_writeback._key_to_flag_remark(rows)
+#     cont = _cosmos_container(settings.cosmos_sap_container)
+#     n = 0
+#     for doc in sap_docs:
+#         key = (cmap._norm_key(doc.get("partnertransactionid"))
+#                or cmap._norm_key(doc.get("paymentreferencenumber"))
+#                or cmap._norm_key(doc.get("dewatransactionid")))
+#         hit = lookup.get(key)
+#         if not hit or not doc.get("id"):
+#             continue
+#         clean = {k: v for k, v in doc.items() if not k.startswith("_")}
+#         clean["reconflag"], clean["remarks"] = hit
+#         cont.upsert_item(clean)
+#         n += 1
+#     return n
+#
+#
+# def _process_file(vendor, date, file_group, sap_txns_all, sap_docs, flags):
+#     """Reconcile ONE file (one Upload_Date) and, if opted-in, write SAP flags + summary."""
+#     write_sap, write_summary, all_sap, force = flags
+#     active = [t for t in file_group if (t.status or "").lower() != "completed"]
+#     it_date = sorted({t.txn_date.isoformat() for t in active if t.txn_date})
+#     sap_txns = (sap_txns_all if all_sap else
+#                 [t for t in sap_txns_all if t.txn_date and t.txn_date.isoformat() in it_date])
+#     run_id = report.run_id_for(vendor)
+#     rows, snap, meta = report.reconcile_and_build(file_group, sap_txns, vendor, run_id)
+#     report.print_summary(rows, snap, meta, vendor)
+#     invalid = sum(1 for r in rows if r["classification"] == "invalid_record")
+#     if rows and invalid / len(rows) > 0.2:
+#         return "error"
+#     enrich_anomalies(rows)
+#     summary_text = run_summary.summarize(rows, snap, vendor, date)
+#     if write_summary and not force and date and _summary_exists(vendor, date):
+#         return "skipped"
+#     if write_sap:
+#         n = _write_sap_reconflag(rows, sap_docs)
+#     doc = sap_writeback.build_summary(vendor, run_id, date=date, summary_text=summary_text)
+#     if write_summary:
+#         summary_store.upsert(doc)
+#     return "processed"
+# ============================================================================
+
+
+# ============================================================================
+# NEW FORMAT — one email doc = one FILE (nested transactions[]); pair to the
+# SAP READ doc (nested transaction[]) by (vendorId, uploadDate=datevalue).
+# ============================================================================
+def _sap_datevalue(doc: dict) -> str | None:
+    """SAP READ doc -> its datevalue (YYYYMMDD) at datetime.datetimelist.datevalue."""
+    return ((doc.get("datetime") or {}).get("datetimelist") or {}).get("datevalue")
+
+
+def _summary_exists_id(doc_id: str, vendor: str) -> bool:
+    try:
+        _cosmos_container(settings.cosmos_results_container).read_item(
+            item=doc_id, partition_key=vendor)
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _write_sap_doc(sap_doc: dict, rows: list[dict]) -> int:
+    """Fill reconflag+remarks into a SAP READ doc's transaction[] and upsert the whole doc."""
+    filled, n = sap_writeback.fill_sap_read(sap_doc, rows)
+    if n and filled.get("id"):
+        clean = {k: v for k, v in filled.items() if not k.startswith("_")}
+        _cosmos_container(settings.cosmos_sap_container).upsert_item(clean)
     return n
 
 
-def _process_file(vendor: str, date: str, file_group: list, sap_txns_all: list,
-                  sap_docs: list, flags: tuple[bool, bool, bool, bool]) -> str:
-    """Reconcile ONE file (one Upload_Date) and, if opted-in, write its SAP flags + summary.
-
-    Returns an outcome: 'processed' | 'skipped' (summary already exists) | 'error' (field drift).
-    """
+def _process_email_file(doc: dict, vendor_filter: str | None, sap_index: dict,
+                        flags: tuple[bool, bool, bool, bool]) -> str:
+    """Reconcile ONE email FILE vs its paired SAP READ doc; opt-in write-back + summary."""
     write_sap, write_summary, all_sap, force = flags
-    active = [t for t in file_group if (t.status or "").lower() != "completed"]
-    it_date = sorted({t.txn_date.isoformat() for t in active if t.txn_date})
-    sap_txns = (sap_txns_all if all_sap else
-                [t for t in sap_txns_all if t.txn_date and t.txn_date.isoformat() in it_date])
+    filename, vendor, upload, txns = cmap.map_email_doc(doc, vendor_filter)
+    active = [t for t in txns if (t.status or "").lower() != "completed"]   # skip Completed
+    skipped = len(txns) - len(active)
+    date = upload.isoformat() if upload else ""
+    datevalue = date.replace("-", "")
 
-    print(f"\n===== FILE {vendor}:{date or '(no upload_date)'}  "
-          f"rows={len(file_group)}  sap_kept={len(sap_txns)}  IT_DATE={it_date} =====")
+    if all_sap:                                       # every SAP doc for this vendor
+        sap_docs = [d for (v, _dv), d in sap_index.items() if v == vendor]
+    else:                                             # the SAP READ doc for this (vendor, date)
+        sap_docs = [sap_index[(vendor, datevalue)]] if (vendor, datevalue) in sap_index else []
+    sap_txns = cmap.map_sap_read(sap_docs)
+
+    print(f"\n===== FILE {filename}  vendor={vendor}  uploadDate={date}  txns={len(txns)} "
+          f"active={len(active)} skipped(Completed)={skipped}  sap_txns={len(sap_txns)} =====")
     run_id = report.run_id_for(vendor)
-    rows, snap, meta = report.reconcile_and_build(file_group, sap_txns, vendor, run_id)
+    rows, snap, meta = report.reconcile_and_build(active, sap_txns, vendor, run_id)
     report.print_summary(rows, snap, meta, vendor)
 
     invalid = sum(1 for r in rows if r["classification"] == "invalid_record")
@@ -112,81 +176,101 @@ def _process_file(vendor: str, date: str, file_group: list, sap_txns_all: list,
               f"Skipping this file (no writes).")
         return "error"
 
-    # triage (AI) — only if TRIAGE_ENABLED; deterministic fallback otherwise
-    enrich_anomalies(rows)
+    enrich_anomalies(rows)                            # AI only if TRIAGE_ENABLED; else deterministic
     summary_text = run_summary.summarize(rows, snap, vendor, date)
 
-    # per-file idempotency guard: skip if THIS file's summary already exists
-    if write_summary and not force and date and _summary_exists(vendor, date):
-        print(f"summary '{vendor}:{date}' already exists — skipping (use --force to reprocess).")
+    if write_summary and not force and filename and _summary_exists_id(filename, vendor):
+        print(f"summary '{filename}' already exists — skipping (use --force to reprocess).")
         return "skipped"
 
-    # write reconflag/remarks back to SAP for this file's rows only (opt-in)
     if write_sap:
-        n = _write_sap_reconflag(rows, sap_docs)
-        print(f"SAP write-back: reconflag+remarks upserted into {n} SAP docs.")
+        total = sum(_write_sap_doc(sd, rows) for sd in sap_docs)
+        print(f"SAP write-back: reconflag+remarks written into {total} SAP txn(s).")
     else:
         preview = sap_writeback.build_write_payload(rows, vendor, date)
-        print(f"[DRY-RUN] SAP write-back would fill {len(preview['transaction'])} txns "
+        print(f"[DRY-RUN] SAP write-back would fill {len(preview['transaction'])} txn(s) "
               f"(pass --write-sap to apply).")
 
-    # summary doc — one per file, WRITTEN LAST so its existence means this file finished
-    doc = sap_writeback.build_summary(vendor, run_id, date=date, summary_text=summary_text)
+    sdoc = sap_writeback.build_summary(vendor, run_id, date=date,
+                                       summary_text=summary_text, filename=filename)
     if write_summary:
         print(f"summary upserted to '{settings.cosmos_results_container}': "
-              f"id={summary_store.upsert(doc)}")
+              f"id={summary_store.upsert(sdoc)}")
     else:
         print("[DRY-RUN] summary doc (pass --write-summary to upsert):")
-        print(json.dumps(doc, indent=2, default=str, ensure_ascii=False))
+        print(json.dumps(sdoc, indent=2, default=str, ensure_ascii=False))
     return "processed"
 
 
+# ---- OLD FORMAT main() (flat rows grouped by Upload_Date) — commented for reference ----
+# def main() -> int:
+#     args = sys.argv[1:]
+#     positional = [a for a in args if not a.startswith("-")]
+#     vendor = positional[0] if positional else "MBANK"
+#     arg_date = positional[1] if len(positional) > 1 else ""
+#     dry_run = "--dry-run" in args
+#     write_sap = (settings.write_sap or "--write-sap" in args) and not dry_run
+#     write_summary = (settings.write_summary or "--write-summary" in args) and not dry_run
+#     flags = (write_sap, write_summary, "--all-sap" in args, "--force" in args)
+#     file_docs = _query(settings.cosmos_file_container, "SELECT * FROM c", [])
+#     file_txns = cmap.map_bank_file(file_docs, vendor)
+#     groups = defaultdict(list)
+#     for t in file_txns:
+#         groups[t.upload_date.isoformat() if t.upload_date else ""].append(t)
+#     dates = sorted(groups)
+#     if arg_date:
+#         dates = [d for d in dates if d == arg_date] or [arg_date]
+#     sap_docs = _query(settings.cosmos_sap_container,
+#                       "SELECT * FROM c WHERE c.vendorid=@v", [{"name": "@v", "value": vendor}])
+#     if not sap_docs:
+#         sap_docs = _query(settings.cosmos_sap_container, "SELECT * FROM c", [])
+#     sap_txns_all = cmap.map_sap_txns(sap_docs)
+#     tally = {}
+#     for date in dates:
+#         outcome = _process_file(vendor, date, groups.get(date, []), sap_txns_all, sap_docs, flags)
+#         tally[outcome] = tally.get(outcome, 0) + 1
+#     return 1 if tally.get("error") else 0
+# ------------------------------------------------------------------------------
+
+
 def main() -> int:
+    """NEW format: each email doc is a FILE; pair it to its SAP READ doc and reconcile.
+
+        python run_cosmos_workflow.py [VENDOR_ID | ALL] [flags]
+
+    With no arg (or ALL) every email file is processed; a VENDOR_ID processes only that
+    vendor's files. Writes are opt-in (--write-sap/--write-summary or WRITE_* in .env;
+    --dry-run forces no writes).
+    """
     args = sys.argv[1:]
     positional = [a for a in args if not a.startswith("-")]
-    vendor = positional[0] if positional else "MBANK"
-    arg_date = positional[1] if len(positional) > 1 else ""
-    # Writes turn on via .env (WRITE_SAP / WRITE_SUMMARY) OR the CLI flag; --dry-run forces off.
+    vendor_filter = positional[0] if positional else None
     dry_run = "--dry-run" in args
     write_sap = (settings.write_sap or "--write-sap" in args) and not dry_run
     write_summary = (settings.write_summary or "--write-summary" in args) and not dry_run
     flags = (write_sap, write_summary, "--all-sap" in args, "--force" in args)
 
-    print(f"VENDOR={vendor}  DATE={arg_date or '(all files in container)'}  "
-          f"triage={'on' if settings.triage_enabled else 'off'}  "
+    print(f"VENDOR_FILTER={vendor_filter or 'ALL'}  triage={'on' if settings.triage_enabled else 'off'}  "
           f"write_sap={write_sap}  write_summary={write_summary}"
           f"{'  [--dry-run: writes forced OFF]' if dry_run else ''}\n")
 
-    # read the whole email container once, map to canonical, then SPLIT INTO FILES
-    file_docs = _query(settings.cosmos_file_container, "SELECT * FROM c", [])
-    print(f"file container '{settings.cosmos_file_container}': {len(file_docs)} docs")
-    print(f"  columns: {_cols(file_docs)}")
-    file_txns = cmap.map_bank_file(file_docs, vendor)
+    email_docs = _query(settings.cosmos_file_container, "SELECT * FROM c", [])
+    sap_docs = _query(settings.cosmos_sap_container, "SELECT * FROM c", [])
+    print(f"email files '{settings.cosmos_file_container}': {len(email_docs)} doc(s)")
+    print(f"SAP  docs   '{settings.cosmos_sap_container}': {len(sap_docs)} doc(s)")
 
-    # one "file" == one Upload_Date (one bank sends one file per day -> vendor:date is unique)
-    groups: dict[str, list] = defaultdict(list)
-    for t in file_txns:
-        groups[t.upload_date.isoformat() if t.upload_date else ""].append(t)
-    dates = sorted(groups)
-    if arg_date:                        # a DATE argument = process only that one file
-        dates = [d for d in dates if d == arg_date] or [arg_date]
+    # index each SAP READ doc by (vendorid, datevalue) so a file pairs to its SAP doc
+    sap_index: dict = {}
+    for d in sap_docs:
+        sap_index[(cmap._s(d.get("vendorid")), _sap_datevalue(d))] = d
 
-    # read the vendor's SAP rows ONCE; each file scopes to its own txn dates
-    sap_docs = _query(settings.cosmos_sap_container,
-                      "SELECT * FROM c WHERE c.vendorid=@v", [{"name": "@v", "value": vendor}])
-    if not sap_docs:
-        print(f"  (no SAP rows for vendorid={vendor}; reading all SAP docs — verify the vendor field)")
-        sap_docs = _query(settings.cosmos_sap_container, "SELECT * FROM c", [])
-    print(f"SAP  container '{settings.cosmos_sap_container}': {len(sap_docs)} docs")
-    print(f"  columns: {_cols(sap_docs)}")
-    sap_txns_all = cmap.map_sap_txns(sap_docs)
-
-    # process each file one-by-one; each gets its own reconcile + its own summary doc
-    print(f"\nfound {len(dates)} file(s) for {vendor}: {dates}")
+    files = [d for d in email_docs
+             if not vendor_filter or vendor_filter.upper() == "ALL"
+             or cmap._s(d.get("vendorId")) == vendor_filter]
+    print(f"\nprocessing {len(files)} email file(s)")
     tally: dict[str, int] = {}
-    for date in dates:
-        outcome = _process_file(vendor, date, groups.get(date, []),
-                                sap_txns_all, sap_docs, flags)
+    for doc in files:
+        outcome = _process_email_file(doc, vendor_filter, sap_index, flags)
         tally[outcome] = tally.get(outcome, 0) + 1
     print(f"\n===== DONE. files -> {tally} =====")
     return 1 if tally.get("error") else 0

@@ -93,81 +93,108 @@ def parse_date(v) -> date | None:
     return None
 
 
+def _bank_txn(*, partner, payment, dewa, amount, txn_date, ttype, settlement,
+              upload, details, status, vendor_code, raw) -> CanonicalTxn:
+    """Build one bank-side CanonicalTxn from already-extracted values (3-field check)."""
+    reasons: list[str] = []
+    if not (partner or payment or dewa):
+        reasons.append("no reference key")
+    if amount is None:
+        reasons.append("unparseable amount")
+    if txn_date is None:
+        reasons.append("unparseable date")
+
+    if partner:
+        mk, kind = partner, "partner"
+    elif payment:
+        mk, kind = payment, "payment"
+    elif dewa:
+        mk, kind = dewa, "dewa"
+    else:
+        mk, kind = None, None
+
+    return CanonicalTxn(
+        source_type="bank", bank_name=vendor_code,
+        partner_txn_id=partner or "", payment_ref_no=payment, dewa_txn_ref=dewa,
+        amount=amount, txn_date=txn_date, txn_type=ttype,
+        settlement_date=settlement, upload_date=upload, details=details,
+        status=status or "", source_channel=VENDOR_SOURCE.get(vendor_code, vendor_code),
+        match_key=mk, match_kind=kind,
+        valid=not reasons, invalid_reason="; ".join(reasons) or None, raw_row=raw,
+    )
+
+
 def map_bank_file(rows: list[dict], vendor_code: str) -> list[CanonicalTxn]:
-    """Normalize standard bank-file attribute rows. Marks invalid rows (3-field check)."""
-    src = VENDOR_SOURCE.get(vendor_code, vendor_code)
+    """LEGACY flat format (PascalCase columns). Kept for the old CSV/flat feed."""
     out: list[CanonicalTxn] = []
     for row in rows:
-        partner = _norm_key(row.get("Partner_Trn_Reference_No"))
-        payment = _norm_key(row.get("Payment_Ref_No"))
-        # live Cosmos column is 'DEWATrn_Reference_No' (no underscore); accept the
-        # underscored spelling too so either standardized feed still joins.
-        dewa = _norm_key(row.get("DEWATrn_Reference_No") or row.get("DEWA_Trn_Reference_No"))
-        amount = _amount(row.get("Trn_Amount"))
-        txn_date = parse_date(row.get("Trn_Date"))
-        ttype = _s(row.get("Type"))  # kept for reporting only — NOT a validation gate
-
-        reasons: list[str] = []
-        if not (partner or payment or dewa):
-            reasons.append("no reference key")
-        if amount is None:
-            reasons.append("unparseable amount")
-        if txn_date is None:
-            reasons.append("unparseable date")
-
-        if partner:
-            mk, kind = partner, "partner"
-        elif payment:
-            mk, kind = payment, "payment"
-        elif dewa:
-            mk, kind = dewa, "dewa"
-        else:
-            mk, kind = None, None
-
-        out.append(CanonicalTxn(
-            source_type="bank", bank_name=vendor_code,
-            partner_txn_id=partner or "",
-            payment_ref_no=payment, dewa_txn_ref=dewa,
-            amount=amount, txn_date=txn_date, txn_type=ttype,
-            settlement_date=parse_date(row.get("Settlement_Date")),
-            upload_date=parse_date(row.get("Upload_Date")),
-            details=_s(row.get("Details")),
-            status=_s(row.get("Status")) or "",
-            source_channel=src,
-            match_key=mk, match_kind=kind,
-            valid=not reasons, invalid_reason="; ".join(reasons) or None,
-            raw_row=row,
+        out.append(_bank_txn(
+            partner=_norm_key(row.get("Partner_Trn_Reference_No")),
+            payment=_norm_key(row.get("Payment_Ref_No")),
+            dewa=_norm_key(row.get("DEWATrn_Reference_No") or row.get("DEWA_Trn_Reference_No")),
+            amount=_amount(row.get("Trn_Amount")), txn_date=parse_date(row.get("Trn_Date")),
+            ttype=_s(row.get("Type")), settlement=parse_date(row.get("Settlement_Date")),
+            upload=parse_date(row.get("Upload_Date")), details=_s(row.get("Details")),
+            status=_s(row.get("Status")), vendor_code=vendor_code, raw=row,
         ))
     return out
 
 
+def map_email_doc(doc: dict, vendor_code: str | None = None) -> tuple[str, str, object, list[CanonicalTxn]]:
+    """NEW nested email FILE -> (filename, vendor_id, upload_date, transactions).
+
+    One Cosmos doc = one file. Fields are camelCase inside the `transactions` array;
+    vendorId / uploadDate / id (=file name) live at the top level. Status filtering
+    (skip 'Completed') is left to the caller so it can report the skipped count.
+    """
+    filename = _s(doc.get("id")) or ""
+    vendor = _s(doc.get("vendorId")) or vendor_code or ""
+    upload = parse_date(doc.get("uploadDate"))
+    out: list[CanonicalTxn] = []
+    for row in doc.get("transactions", []) or []:
+        out.append(_bank_txn(
+            partner=_norm_key(row.get("partnerTrnReferenceNo")),
+            payment=_norm_key(row.get("paymentRefNo")),
+            dewa=_norm_key(row.get("dewaTrnReferenceNo")),
+            amount=_amount(row.get("trnAmount")), txn_date=parse_date(row.get("trnDate")),
+            ttype=_s(row.get("type")), settlement=parse_date(row.get("settlementDate")),
+            upload=upload, details=None, status=_s(row.get("status")),
+            vendor_code=vendor, raw=row,
+        ))
+    return filename, vendor, upload, out
+
+
 def map_sap_txns(rows: list[dict]) -> list[CanonicalTxn]:
-    """Normalize SAP Cosmos DB rows into canonical shape.
+    """Normalize SAP transaction rows (lowercase keys) into canonical shape.
 
-    New SAP Cosmos structure (lowercase keys):
-      vendorid, transactiondate, partnertransactionid, paymentreferencenumber,
-      dewatransactionid, amount, currency, status, reconflag, remarks.
-
-    partnertransactionid / paymentreferencenumber hold the partner and payment
-    refs; dewatransactionid holds the DEWA ref. The join key mirrors the file
-    side's precedence: partner -> payment -> dewa.
+    partner_txn_id holds the ACTUAL partnertransactionid (may be empty); payment_ref_no
+    and dewa_txn_ref hold their refs. partnertransactionid / paymentreferencenumber may
+    arrive as NUMBERS — _norm_key stringifies and strips a trailing '.0'.
     """
     out: list[CanonicalTxn] = []
     for row in rows:
         partner = _norm_key(row.get("partnertransactionid"))
         payment = _norm_key(row.get("paymentreferencenumber"))
         dewa = _norm_key(row.get("dewatransactionid"))
-        key = partner or payment or dewa
         out.append(CanonicalTxn(
             source_type="sap", bank_name=_s(row.get("vendorid")) or "",
-            partner_txn_id=key or "",
-            payment_ref_no=payment,
-            dewa_txn_ref=dewa,
-            amount=_amount(row.get("amount")),
-            txn_date=parse_date(row.get("transactiondate")),
-            status=_s(row.get("status")) or "",
-            details=_s(row.get("remarks")),
-            match_key=key, match_kind="txnid",
-            raw_row=row,
+            # OLD FORMAT stored the resolved precedence key here (partner_txn_id=key). NEW rule
+            # needs the ACTUAL partner so the AND match can compare each ref field independently.
+            partner_txn_id=partner or "", payment_ref_no=payment, dewa_txn_ref=dewa,
+            amount=_amount(row.get("amount")), txn_date=parse_date(row.get("transactiondate")),
+            status=_s(row.get("status")) or "", details=_s(row.get("remarks")),
+            match_key=partner or payment or dewa, match_kind="txnid", raw_row=row,
         ))
     return out
+
+
+def map_sap_read(docs: list[dict]) -> list[CanonicalTxn]:
+    """Flatten SAP READ docs (each has a `transaction` array) -> canonical SAP txns.
+
+    Accepts either a list of READ-response docs or already-flat rows (defensive).
+    """
+    rows: list[dict] = []
+    for doc in docs:
+        txns = doc.get("transaction")
+        rows.extend(txns if isinstance(txns, list) else [doc])
+    return map_sap_txns(rows)

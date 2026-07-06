@@ -3,15 +3,28 @@
 How an **email-source** bank record is matched against a **SAP** record. Deterministic —
 no AI. This is the agreed business rule for the matcher.
 
+## File shape (NEW nested format)
+
+- **Email:** one Cosmos doc = **one file**. Top level: `vendorId`, `uploadDate`, `id` (= file name).
+  Transactions are in a **`transactions[]`** array (camelCase fields).
+- **SAP:** one READ doc with a **`transaction[]`** array; top-level `vendorid` + `datetime.datetimelist.datevalue`.
+- An email file pairs to the SAP doc with the same `(vendorId, uploadDate → datevalue)`.
+
 ## Reference columns (which field maps to which)
 
-| Reference | Email source column | SAP column |
-|-----------|--------------------|------------|
-| Partner   | `Partner_Trn_Reference_No` | `partnertransactionid` |
-| Payment   | `Payment_Ref_No` | `paymentreferencenumber` |
-| DEWA      | `DEWATrn_Reference_No` | `dewatransactionid` |
+| Reference | Email (`transactions[]`) | SAP (`transaction[]`) |
+|-----------|--------------------------|-----------------------|
+| Partner   | `partnerTrnReferenceNo` | `partnertransactionid` |
+| Payment   | `paymentRefNo` | `paymentreferencenumber` |
+| DEWA      | `dewaTrnReferenceNo` | `dewatransactionid` |
 
-Amount: `Trn_Amount` ↔ `amount`  ·  Date: `Trn_Date` ↔ `transactiondate` (compared day-level).
+Amount: `trnAmount` ↔ `amount`  ·  Date: `trnDate` ↔ `transactiondate` (compared day-level).
+SAP ids may arrive as **numbers** — they are stringified for matching.
+
+## Status filter (which email transactions we process)
+
+- `status` = **blank** or **"In Progress"** → reconcile and (if in SAP) write back.
+- `status` = **"Completed"** → **skipped** entirely (not reconciled, not written).
 
 ## The core rule — driven by what the EMAIL record contains
 

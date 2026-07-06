@@ -104,19 +104,34 @@ def write_sap_read_file(path, response: dict) -> None:
         f.write("\n")
 
 
-def build_summary(vendorid: str, run_id: str, *, date: str, summary_text: str) -> dict:
-    """The `summary`-container doc — 7 fields: identity + status + one AI text summary.
+# ---- OLD FORMAT summary id = vendor:date (kept commented for reference) ----
+# def build_summary(vendorid: str, run_id: str, *, date: str, summary_text: str) -> dict:
+#     return {
+#         "id": f"{vendorid}:{date}" if date else run_id,
+#         "vendor_id": vendorid,
+#         "date": date,
+#         "status": "complete",
+#         "run_id": run_id,
+#         "summary": summary_text,
+#         "generated_at": datetime.now(timezone.utc).isoformat(),
+#     }
 
-    `date` = the day the email arrived (Upload_Date, day-level). One bank sends one file
-    per day, so (vendor_id, date) is unique → the stable id. Settlement dates can VARY
-    within a file, so they are NOT part of the id (they're described inside `summary`).
+
+def build_summary(vendorid: str, run_id: str, *, date: str, summary_text: str,
+                  filename: str | None = None) -> dict:
+    """The `summary`-container doc. NEW format: keyed by the file name (unique per file).
+
+    Each email file has its own unique name (`id`), so the summary id IS that file name.
+    A file can span settlement dates, so date is descriptive only (stored, not the key).
+    `summary_text` is the DETAILED run summary for the summary container.
     """
     return {
-        "id": f"{vendorid}:{date}" if date else run_id,
+        "id": filename or (f"{vendorid}:{date}" if date else run_id),
         "vendor_id": vendorid,
-        "date": date,                 # day the email arrived — unique per vendor/day
+        "filename": filename,         # unique email file name (Cosmos doc id)
+        "date": date,                 # email upload day (day-level) — descriptive
         "status": "complete",         # the comparison our code performed is finished
         "run_id": run_id,
-        "summary": summary_text,      # AI-generated (grounded) run summary text
+        "summary": summary_text,      # DETAILED grounded run summary text
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
