@@ -34,7 +34,7 @@ class Settings(BaseSettings):
     write_summary: bool = False
 
     # mode
-    source_mode: str = "fixture"  # fixture | cosmos
+    source_mode: str = "cosmos"  # cosmos (live) | fixture (local JSON offline test)
 
     # Triage / explanation agent — advisory LLM layer (see explaination_agent.md).
     # OFF by default: the deterministic pipeline runs unchanged when disabled.

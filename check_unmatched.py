@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import sys
 
-from run_cosmos_workflow import _query, _sap_datevalue       # noqa: E402
+from run_cosmos_workflow import _query, _sap_datevalue, _file_datevalues  # noqa: E402
 from bank_reconciliation.config import settings              # noqa: E402
 from bank_reconciliation.schema import canonical_mapper as cmap  # noqa: E402
 from bank_reconciliation.recon.dynamic_matcher import reconcile  # noqa: E402
@@ -65,11 +65,11 @@ def main() -> int:
         if vendor_filter and vendor_filter.upper() != "ALL" and vendor != vendor_filter:
             continue
         active = [t for t in txns if (t.status or "").lower() != "completed"]   # skip Completed
-        datevalue = (upload.isoformat().replace("-", "")) if upload else ""
+        file_dvs = _file_datevalues(active)            # a file may span several dates
         if all_sap:
             paired = [d for (v, _dv), d in sap_index.items() if v == vendor]
         else:
-            paired = [sap_index[(vendor, datevalue)]] if (vendor, datevalue) in sap_index else []
+            paired = [d for (v, dv), d in sap_index.items() if v == vendor and dv in file_dvs]
         sap_txns = cmap.map_sap_read(paired)
         rows = reconcile(active, sap_txns)
         print(f"\n===== FILE {filename}  vendor={vendor}  uploadDate={upload}  "

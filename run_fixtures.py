@@ -36,12 +36,16 @@ def _process(doc: dict, vendor_filter: str | None, sap_index: dict) -> tuple[str
     active = [t for t in txns if (t.status or "").lower() != "completed"]     # skip Completed
     skipped = len(txns) - len(active)
     date = upload.isoformat() if upload else ""
-    datevalue = date.replace("-", "")
-    paired = [sap_index[(vendor, datevalue)]] if (vendor, datevalue) in sap_index else []
+    # one email file may span several dates; SAP splits into one file per date -> pair to all
+    file_dvs = {d for t in active for d in (
+        [t.txn_date.isoformat().replace("-", "")] if t.txn_date else []) + (
+        [t.settlement_date.isoformat().replace("-", "")] if t.settlement_date else [])}
+    paired = [d for (v, dv), d in sap_index.items() if v == vendor and dv in file_dvs]
     sap_txns = cmap.map_sap_read(paired)
 
-    print(f"\n===== FILE {filename}  vendor={vendor}  uploadDate={date}  txns={len(txns)} "
-          f"active={len(active)} skipped(Completed)={skipped}  sap_txns={len(sap_txns)} =====")
+    print(f"\n===== FILE {filename}  vendor={vendor}  uploadDate={date}  dates={sorted(file_dvs)}  "
+          f"txns={len(txns)} active={len(active)} skipped(Completed)={skipped}  "
+          f"sap_docs={len(paired)} sap_txns={len(sap_txns)} =====")
     run_id = report.run_id_for(vendor)
     rows, snap, meta = report.reconcile_and_build(active, sap_txns, vendor, run_id)
     report.print_summary(rows, snap, meta, vendor)

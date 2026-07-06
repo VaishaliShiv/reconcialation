@@ -141,6 +141,21 @@ def _sap_datevalue(doc: dict) -> str | None:
     return ((doc.get("datetime") or {}).get("datetimelist") or {}).get("datevalue")
 
 
+def _file_datevalues(txns: list) -> set[str]:
+    """All YYYYMMDD dates present in a file's transactions (txn + settlement dates).
+
+    An email file may span multiple dates; SAP splits those into one file per date, so we
+    pair against every SAP file whose datevalue matches one of these.
+    """
+    dvs: set[str] = set()
+    for t in txns:
+        if t.txn_date:
+            dvs.add(t.txn_date.isoformat().replace("-", ""))
+        if t.settlement_date:
+            dvs.add(t.settlement_date.isoformat().replace("-", ""))
+    return dvs
+
+
 def _summary_exists_id(doc_id: str, vendor: str) -> bool:
     if settings.source_mode == "fixture":            # no idempotency guard offline
         return False
@@ -175,16 +190,19 @@ def _process_email_file(doc: dict, vendor_filter: str | None, sap_index: dict,
     active = [t for t in txns if (t.status or "").lower() != "completed"]   # skip Completed
     skipped = len(txns) - len(active)
     date = upload.isoformat() if upload else ""
-    datevalue = date.replace("-", "")
 
+    # One email file can span several settlement/txn dates; SAP delivers ONE file per date.
+    # Pair this email file to EVERY SAP doc whose date matches a date present in the file.
+    file_dvs = _file_datevalues(active)
     if all_sap:                                       # every SAP doc for this vendor
         sap_docs = [d for (v, _dv), d in sap_index.items() if v == vendor]
-    else:                                             # the SAP READ doc for this (vendor, date)
-        sap_docs = [sap_index[(vendor, datevalue)]] if (vendor, datevalue) in sap_index else []
+    else:                                             # SAP docs covering this file's date(s)
+        sap_docs = [d for (v, dv), d in sap_index.items() if v == vendor and dv in file_dvs]
     sap_txns = cmap.map_sap_read(sap_docs)
 
-    print(f"\n===== FILE {filename}  vendor={vendor}  uploadDate={date}  txns={len(txns)} "
-          f"active={len(active)} skipped(Completed)={skipped}  sap_txns={len(sap_txns)} =====")
+    print(f"\n===== FILE {filename}  vendor={vendor}  uploadDate={date}  dates={sorted(file_dvs)}  "
+          f"txns={len(txns)} active={len(active)} skipped(Completed)={skipped}  "
+          f"sap_docs={len(sap_docs)} sap_txns={len(sap_txns)} =====")
     run_id = report.run_id_for(vendor)
     rows, snap, meta = report.reconcile_and_build(active, sap_txns, vendor, run_id)
     report.print_summary(rows, snap, meta, vendor)

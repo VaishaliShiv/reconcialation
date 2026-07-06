@@ -18,5 +18,8 @@ recon_summary*.json
 *.xlsx
 .~lock*
 
+# local test fixtures — kept out of the repo (each user provides their own sample data)
+fixtures/
+
 # os
 .DS_Store
