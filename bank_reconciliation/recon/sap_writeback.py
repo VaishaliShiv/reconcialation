@@ -55,10 +55,15 @@ def _txn(row: dict) -> dict:
     }
 
 
+# classifications that correspond to a real SAP transaction THIS file references -> safe to stamp
+_STAMPABLE = {"matched", "amount_mismatch", "date_mismatch", "duplicate"}
+
+
 def build_write_payload(rows: list[dict], vendorid: str, iso_date: str) -> dict:
-    """Build the SAP WRITE plaintext request. invalid_record rows are skipped
-    (returned to bank, not reconciled)."""
-    txns = [_txn(r) for r in rows if r.get("classification") != "invalid_record"]
+    """Build the SAP WRITE plaintext request. Includes ONLY rows this file references and
+    that exist in SAP (matched / amount|date mismatch / duplicate). Skips missing_in_sap
+    (no SAP row), missing_in_file (another file's row — see example.md), invalid_record."""
+    txns = [_txn(r) for r in rows if r.get("classification") in _STAMPABLE]
     return {
         "vendorid": vendorid,
         "mode": "WRITE",
@@ -68,9 +73,17 @@ def build_write_payload(rows: list[dict], vendorid: str, iso_date: str) -> dict:
 
 
 def _key_to_flag_remark(rows: list[dict]) -> dict[str, tuple[str, str]]:
-    """resolved join key -> (reconflag, remarks), from the recon result rows."""
+    """resolved join key -> (reconflag, remarks), from the recon result rows.
+
+    SCOPED write-back: stamp ONLY the SAP rows THIS email file references — i.e. rows the
+    file matched or mismatched. `missing_in_file` rows (SAP rows this file does NOT
+    reference) are skipped, so a file never overwrites another file's rows in a shared
+    date-doc (see example.md). Genuine missing_in_file is a batch/end-of-day concern.
+    """
     out: dict[str, tuple[str, str]] = {}
     for r in rows:
+        if r.get("classification") == "missing_in_file":   # not this file's row -> don't stamp
+            continue
         ku = r.get("match_key_used") or ""
         val = ku.split(":", 1)[1] if ":" in ku else ku
         key = _norm_key(val)
