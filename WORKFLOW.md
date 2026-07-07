@@ -145,3 +145,38 @@ nbd1Qmid_20260624:  P-003 -> ANOMALY (Date mismatch)   P-007 -> ANOMALY (Duplica
 - **An email file pairs to every SAP file whose date it contains.**
 - **Write-back stamps only the rows the email file owns** (never another file's rows).
 - **Skip `Completed`** email transactions; flag `invalid_record` for rows with no reference.
+
+---
+
+## 7. Testing ONE email file against the SAP file(s) you choose
+
+You don't hand the runner the SAP file by name. You name **the email file by its id** and the
+**SAP file(s) by vendorId + date** — because a SAP file's name *is* `vendorid_datevalue`.
+
+| Input | Flag | Example |
+|-------|------|---------|
+| The one email file | `--email-id` | `--email-id file-001-20260629` |
+| The SAP file(s) | `VENDOR_ID` arg + `--dates` (YYYYMMDD, comma-sep) | `nbd1Qmid --dates 20260629,20260630` |
+| Compare against EXACTLY those SAP files | `--all-sap` | (skip date auto-scoping) |
+| Read-only preview (writes nothing) | `--dry-run` | |
+
+```bash
+# one email file  ->  ONE sap file
+python run_cosmos_workflow.py nbd1Qmid --email-id file-001-20260629 --dates 20260629 --all-sap --dry-run
+
+# one email file  ->  MULTIPLE sap files (same vendor, several dates)
+python run_cosmos_workflow.py nbd1Qmid --email-id file-001-20260629 --dates 20260629,20260630 --all-sap --dry-run
+
+# one email file, let the code pick the SAP file(s) from the file's own dates
+python run_cosmos_workflow.py nbd1Qmid --email-id file-001-20260629 --dry-run
+```
+
+- With `--email-id`, only that email doc is read (`SELECT * FROM c WHERE c.id=@id`) — cheap to
+  re-run while testing.
+- `--dates` scopes SAP to those dates for the vendor. **With** `--all-sap` the email file is
+  compared to *exactly* those SAP files; **without** it, they must also overlap the email file's
+  own dates (the normal auto-pairing).
+- The per-file line prints `sap_docs=N sap_txns=M` — check it to confirm you paired to **one**
+  SAP file or **several** before trusting the classifications.
+- When the dry-run output looks right, drop `--dry-run` and add `--write-sap` (and
+  `--write-summary`) to stamp results back.

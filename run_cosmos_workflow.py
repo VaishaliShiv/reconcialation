@@ -12,11 +12,26 @@ transactions[] array). It is paired to the SAP READ doc (transaction[] array) by
 With no arg (or ALL) every email file is processed; a VENDOR_ID limits to that vendor.
 Email transactions with status 'Completed' are skipped; 'In Progress'/blank are processed.
 
+TARGETED TEST — one email file vs the SAP file(s) YOU choose. The email file is named by its
+own id (--email-id); the SAP file(s) are named by vendorid + date, so you pick them with the
+VENDOR_ID arg + --dates (YYYYMMDD), never by SAP id:
+    # one email file  ->  ONE sap file (vendor nbd1Qmid, date 20260629)
+    python run_cosmos_workflow.py nbd1Qmid --email-id file-001-20260629 --dates 20260629 --all-sap --dry-run
+    # one email file  ->  MULTIPLE sap files (two dates, same vendor)
+    python run_cosmos_workflow.py nbd1Qmid --email-id file-001-20260629 --dates 20260629,20260630 --all-sap --dry-run
+    # let the code pick the SAP file(s) automatically from the email file's own dates
+    python run_cosmos_workflow.py nbd1Qmid --email-id file-001-20260629 --dry-run
+
 Flags:
+    --email-id ID     process ONLY the email doc whose id == ID (default: every email file)
+    --dates D1,D2     restrict SAP to these datevalues (YYYYMMDD) for the vendor. The SAP file
+                      name IS vendorid+date, so this is how you name the SAP file(s). With
+                      --all-sap the email file is compared to EXACTLY these SAP files; without
+                      it they still must overlap the email file's own dates. Default: all SAP.
     --write-sap       upsert reconflag + remarks into the SAP docs (bank-sap-source)
     --write-summary   upsert the summary doc to COSMOS_RESULTS_CONTAINER  (written LAST)
     --dry-run         force a NO-WRITE run even if WRITE_SAP/WRITE_SUMMARY are on in .env
-    --all-sap         don't date-scope SAP; use every SAP row for the vendor
+    --all-sap         don't date-scope SAP; use every SAP file loaded for the vendor
     --force           ignore the "summary already exists" idempotency guard
 
 Writes turn on EITHER via these flags OR by setting WRITE_SAP=true / WRITE_SUMMARY=true in
@@ -46,6 +61,32 @@ from bank_reconciliation.triage import enrich_anomalies, run_summary  # noqa: E4
 
 ROOT = pathlib.Path(__file__).resolve().parent
 FIXTURE_DIR = ROOT / "fixtures"
+
+
+def _opt(args: list[str], key: str) -> str | None:
+    """Read `--key value` or `--key=value` from argv (None if absent)."""
+    for i, a in enumerate(args):
+        if a == key and i + 1 < len(args):
+            return args[i + 1]
+        if a.startswith(key + "="):
+            return a.split("=", 1)[1]
+    return None
+
+
+def _positionals(args: list[str], consumes: set[str]) -> list[str]:
+    """Positional args, skipping flags and the value that follows a `--key value` option."""
+    out, skip = [], False
+    for a in args:
+        if skip:                       # this token is the value of the previous --key
+            skip = False
+            continue
+        if a in consumes:              # `--key value` form: consume its value next
+            skip = True
+            continue
+        if a.startswith("-"):          # a flag or `--key=value` form
+            continue
+        out.append(a)
+    return out
 
 
 def _cosmos_container(name: str):
@@ -283,21 +324,39 @@ def main() -> int:
     --dry-run forces no writes).
     """
     args = sys.argv[1:]
-    positional = [a for a in args if not a.startswith("-")]
+    email_id = _opt(args, "--email-id")            # name the ONE email file to test
+    dates_opt = _opt(args, "--dates")              # name the SAP file(s) by their date(s)
+    sap_dates = {d.strip() for d in dates_opt.split(",") if d.strip()} if dates_opt else None
+    positional = _positionals(args, consumes={"--email-id", "--dates"})
     vendor_filter = positional[0] if positional else None
     dry_run = "--dry-run" in args
     write_sap = (settings.write_sap or "--write-sap" in args) and not dry_run
     write_summary = (settings.write_summary or "--write-summary" in args) and not dry_run
     flags = (write_sap, write_summary, "--all-sap" in args, "--force" in args)
 
-    print(f"VENDOR_FILTER={vendor_filter or 'ALL'}  triage={'on' if settings.triage_enabled else 'off'}  "
+    print(f"VENDOR_FILTER={vendor_filter or 'ALL'}  email_id={email_id or 'ALL'}  "
+          f"sap_dates={sorted(sap_dates) if sap_dates else 'ALL'}  "
+          f"triage={'on' if settings.triage_enabled else 'off'}  "
           f"write_sap={write_sap}  write_summary={write_summary}"
           f"{'  [--dry-run: writes forced OFF]' if dry_run else ''}\n")
 
-    email_docs = _query(settings.cosmos_file_container, "SELECT * FROM c", [])
+    # Email side: pull ONLY the named file when --email-id is given, else every file.
+    if email_id:
+        email_docs = _query(settings.cosmos_file_container,
+                            "SELECT * FROM c WHERE c.id=@id", [{"name": "@id", "value": email_id}])
+        email_docs = [d for d in email_docs if cmap._s(d.get("id")) == email_id]  # fixture-safe
+    else:
+        email_docs = _query(settings.cosmos_file_container, "SELECT * FROM c", [])
     sap_docs = _query(settings.cosmos_sap_container, "SELECT * FROM c", [])
+
+    # SAP side: the SAP file name is vendorid+date, so scope to the requested vendor + date(s).
+    if vendor_filter and vendor_filter.upper() != "ALL":
+        sap_docs = [d for d in sap_docs if cmap._s(d.get("vendorid")) == vendor_filter]
+    if sap_dates:
+        sap_docs = [d for d in sap_docs if _sap_datevalue(d) in sap_dates]
     print(f"email files '{settings.cosmos_file_container}': {len(email_docs)} doc(s)")
-    print(f"SAP  docs   '{settings.cosmos_sap_container}': {len(sap_docs)} doc(s)")
+    print(f"SAP  docs   '{settings.cosmos_sap_container}': {len(sap_docs)} doc(s)"
+          f" (vendor+dates scoped)" if (vendor_filter or sap_dates) else "")
 
     # index each SAP READ doc by (vendorid, datevalue) so a file pairs to its SAP doc
     sap_index: dict = {}
