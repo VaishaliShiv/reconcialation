@@ -177,9 +177,27 @@ def _summary_exists(vendor: str, date: str) -> bool:
 # NEW FORMAT — one email doc = one FILE (nested transactions[]); pair to the
 # SAP READ doc (nested transaction[]) by (vendorId, uploadDate=datevalue).
 # ============================================================================
+def _sap_vendor(doc: dict) -> str | None:
+    """SAP doc -> its vendor id. Accepts either casing (vendorid / vendorId)."""
+    return cmap._s(doc.get("vendorid") or doc.get("vendorId"))
+
+
 def _sap_datevalue(doc: dict) -> str | None:
-    """SAP READ doc -> its datevalue (YYYYMMDD) at datetime.datetimelist.datevalue."""
-    return ((doc.get("datetime") or {}).get("datetimelist") or {}).get("datevalue")
+    """SAP doc -> its datevalue (YYYYMMDD), tolerant of the formats we've seen:
+
+    1. SAP READ API:   datetime.datetimelist.datevalue   -> "20260520"
+    2. Cosmos source:  uploadDate                         -> "2026-05-20"
+    3. Fallback:       trailing 8 digits of the id        -> "hbb1Qmid-20260520"
+    """
+    dv = ((doc.get("datetime") or {}).get("datetimelist") or {}).get("datevalue")
+    if cmap._s(dv):
+        return cmap._s(dv)
+    up = cmap._s(doc.get("uploadDate"))                      # "2026-05-20" -> "20260520"
+    if up:
+        digits = up.replace("-", "")
+        return digits if len(digits) == 8 and digits.isdigit() else None
+    tail = "".join(ch for ch in (cmap._s(doc.get("id")) or "") if ch.isdigit())[-8:]
+    return tail if len(tail) == 8 else None
 
 
 def _file_datevalues(txns: list) -> set[str]:
@@ -347,21 +365,31 @@ def main() -> int:
         email_docs = [d for d in email_docs if cmap._s(d.get("id")) == email_id]  # fixture-safe
     else:
         email_docs = _query(settings.cosmos_file_container, "SELECT * FROM c", [])
-    sap_docs = _query(settings.cosmos_sap_container, "SELECT * FROM c", [])
+    sap_raw = _query(settings.cosmos_sap_container, "SELECT * FROM c", [])
 
     # SAP side: the SAP file name is vendorid+date, so scope to the requested vendor + date(s).
+    sap_docs = sap_raw
     if vendor_filter and vendor_filter.upper() != "ALL":
-        sap_docs = [d for d in sap_docs if cmap._s(d.get("vendorid")) == vendor_filter]
+        sap_docs = [d for d in sap_docs if _sap_vendor(d) == vendor_filter]
     if sap_dates:
         sap_docs = [d for d in sap_docs if _sap_datevalue(d) in sap_dates]
     print(f"email files '{settings.cosmos_file_container}': {len(email_docs)} doc(s)")
-    print(f"SAP  docs   '{settings.cosmos_sap_container}': {len(sap_docs)} doc(s)"
-          f" (vendor+dates scoped)" if (vendor_filter or sap_dates) else "")
+    print(f"SAP  docs   '{settings.cosmos_sap_container}': {len(sap_docs)} of {len(sap_raw)} raw"
+          f"{' (vendor+dates scoped)' if (vendor_filter or sap_dates) else ''}")
 
-    # index each SAP READ doc by (vendorid, datevalue) so a file pairs to its SAP doc
+    # If the container HAS docs but scoping killed them all, show the real structure so a
+    # field/format mismatch (e.g. vendorId vs vendorid) is obvious instead of a silent zero.
+    if sap_raw and not sap_docs:
+        s = sap_raw[0]
+        print("⚠️  SAP docs exist but NONE matched the vendor/date scope. First raw SAP doc:")
+        print(f"    top-level keys : {sorted(k for k in s if not k.startswith('_'))}")
+        print(f"    derived vendor : {_sap_vendor(s)!r}   (you asked for {vendor_filter!r})")
+        print(f"    derived date   : {_sap_datevalue(s)!r}  (you asked for {sorted(sap_dates) if sap_dates else 'ALL'})")
+
+    # index each SAP READ doc by (vendor, datevalue) so a file pairs to its SAP doc
     sap_index: dict = {}
     for d in sap_docs:
-        sap_index[(cmap._s(d.get("vendorid")), _sap_datevalue(d))] = d
+        sap_index[(_sap_vendor(d), _sap_datevalue(d))] = d
 
     files = [d for d in email_docs
              if not vendor_filter or vendor_filter.upper() == "ALL"
