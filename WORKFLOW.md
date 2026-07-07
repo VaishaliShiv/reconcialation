@@ -23,6 +23,21 @@ Each transaction carries up to **three reference numbers** plus an **amount** an
 - **To confirm a match:** the email `trnDate` must equal the SAP `transactiondate` (same day).
 - **The join itself does NOT use the date** — it joins on the reference numbers; the date is a
   check applied *after* a reference match.
+- **The email file's top-level `uploadDate` is NOT used** to pick SAP files — only the
+  per-transaction `trnDate` + `settlementDate` are. (The file may be uploaded on a day totally
+  different from the transactions it carries.)
+
+**What each date does (at a glance):**
+
+| Date | Side | Role |
+|------|------|------|
+| email `uploadDate` | email file | **ignored** for pairing and matching |
+| email `trnDate` | email txn | the per-row **same-day** check vs SAP `transactiondate` |
+| email `settlementDate` | email txn | contributes to **auto-pairing** (which SAP file) — bypassed by `--all-sap` |
+| SAP `uploadDate` / `datevalue` | SAP file | **names** the SAP file's date so vendor+date scoping finds it |
+
+So a normal run pairs by `trnDate`+`settlementDate`, and the match itself hinges on
+`trnDate` == SAP `transactiondate`.
 
 ---
 
@@ -33,8 +48,16 @@ SAP container, with a unique id built from **vendor + date**:
 
 ```
 id = "<vendorid>_<datevalue>"      e.g.  nbd1Qmid_20260623
-datevalue = datetime.datetimelist.datevalue  (YYYYMMDD)
 ```
+
+**How the SAP file's date is read** (the runner tolerates all three formats we've seen, in
+this order):
+1. `datetime.datetimelist.datevalue`  → `20260623`  (SAP READ API shape)
+2. top-level `uploadDate`             → `2026-05-20` → `20260520`  (current Cosmos source shape)
+3. trailing 8 digits of the `id`      → `hbb1Qmid-20260520` → `20260520`  (last-resort fallback)
+
+The vendor is read as `vendorid` **or** `vendorId` (either casing). This is what makes
+vendor+date scoping (`--dates`) match your SAP docs.
 
 - One date = one document. The same date coming again updates the **same** document (upsert),
   never a duplicate.
