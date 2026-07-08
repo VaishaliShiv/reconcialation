@@ -25,14 +25,13 @@ def _allowed_amounts(row: dict) -> set[str]:
     return out
 
 
-def numbers_are_grounded(text: str | None, row: dict) -> bool:
-    """A money-shaped figure (has a decimal point) in the text MUST equal a row amount.
+def _grounded(text: str | None, allowed: set[str]) -> bool:
+    """A money-shaped figure (has a decimal point) in the text MUST be in `allowed`.
 
     Bare integers (counts, IDs, date parts) are ignored — only decimal figures are
     treated as monetary claims, so a fabricated amount is caught without false-flagging
     '2 postings' or a reference number.
     """
-    allowed = _allowed_amounts(row)
     for tok in _NUM.findall((text or "").replace(",", "")):
         if "." not in tok:            # not a money claim
             continue
@@ -43,6 +42,23 @@ def numbers_are_grounded(text: str | None, row: dict) -> bool:
         if n not in allowed:
             return False
     return True
+
+
+def numbers_are_grounded(text: str | None, row: dict) -> bool:
+    """Grounding check for a single anomaly row (amount_source/amount_sap/amount_diff)."""
+    return _grounded(text, _allowed_amounts(row))
+
+
+def numbers_grounded_in(text: str | None, values) -> bool:
+    """Grounding check against an EXPLICIT set of allowed figures (totals, exposure, %,
+    per-row amounts …). Used by the run summary, which may legitimately cite any of them."""
+    allowed: set[str] = set()
+    for v in values:
+        try:
+            allowed.add(f"{abs(float(v)):.2f}")
+        except (TypeError, ValueError):
+            pass
+    return _grounded(text, allowed)
 
 
 def action_agrees(out: TriageOutput, row: dict) -> bool:
