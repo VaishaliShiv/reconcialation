@@ -34,11 +34,14 @@ from bank_reconciliation.schema import canonical_mapper as cmap          # noqa:
 from bank_reconciliation.triage import enrich_anomalies, run_summary     # noqa: E402
 
 # ============================================================================
-# WRITE SWITCHES — all OFF for testing. Nothing reaches Cosmos while False.
+# WRITE SWITCHES — driven by .env (WRITE_SAP / WRITE_SUMMARY / WRITE_EVIDENCE).
+# All default to false, so nothing reaches Cosmos until you set them in .env.
+# WRITE_EVIDENCE writes the per-comparison audit trail to the evidence container
+# (separate, append-only — safe to enable independently of the other two).
 # ============================================================================
-WRITE_SAP = False
-WRITE_SUMMARY = False
-WRITE_EVIDENCE = False       # per-comparison audit trail -> evidence container (append-only)
+WRITE_SAP = settings.write_sap
+WRITE_SUMMARY = settings.write_summary
+WRITE_EVIDENCE = settings.write_evidence
 
 
 def _cosmos_container(name: str):

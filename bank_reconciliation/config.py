@@ -32,6 +32,7 @@ class Settings(BaseSettings):
     # writes WITHOUT needing --write-sap/--write-summary. Pass --dry-run to force no writes.
     write_sap: bool = False
     write_summary: bool = False
+    write_evidence: bool = False   # per-comparison audit trail -> evidence container
 
     # mode
     source_mode: str = "cosmos"  # cosmos (live) | fixture (local JSON offline test)
