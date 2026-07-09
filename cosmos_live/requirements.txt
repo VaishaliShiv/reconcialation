@@ -1,0 +1,10 @@
+pandas>=2.2
+pydantic>=2.7
+pydantic-settings>=2.3
+python-dotenv>=1.0
+azure-cosmos>=4.7
+httpx>=0.27
+openpyxl>=3.1
+openai>=1.40      # triage/explanation agent (advisory LLM layer) — supports Azure OpenAI
+# dev
+pytest>=8.0

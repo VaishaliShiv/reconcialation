@@ -1,0 +1,66 @@
+"""Deterministic checks that wrap the untrusted model output (see explaination_agent.md §5a).
+
+Every guardrail fails safe toward the engine: a trip discards AI text, never the row.
+"""
+from __future__ import annotations
+
+import re
+
+from .schema import TriageOutput
+
+_MONEY_FIELDS = ("amount_source", "amount_sap", "amount_diff")
+_NUM = re.compile(r"\d[\d,]*\.?\d*")
+
+
+def _allowed_amounts(row: dict) -> set[str]:
+    out: set[str] = set()
+    for k in _MONEY_FIELDS:
+        v = row.get(k)
+        if v in (None, ""):
+            continue
+        try:
+            out.add(f"{abs(float(v)):.2f}")
+        except (TypeError, ValueError):
+            pass
+    return out
+
+
+def _grounded(text: str | None, allowed: set[str]) -> bool:
+    """A money-shaped figure (has a decimal point) in the text MUST be in `allowed`.
+
+    Bare integers (counts, IDs, date parts) are ignored — only decimal figures are
+    treated as monetary claims, so a fabricated amount is caught without false-flagging
+    '2 postings' or a reference number.
+    """
+    for tok in _NUM.findall((text or "").replace(",", "")):
+        if "." not in tok:            # not a money claim
+            continue
+        try:
+            n = f"{abs(float(tok)):.2f}"
+        except ValueError:
+            continue
+        if n not in allowed:
+            return False
+    return True
+
+
+def numbers_are_grounded(text: str | None, row: dict) -> bool:
+    """Grounding check for a single anomaly row (amount_source/amount_sap/amount_diff)."""
+    return _grounded(text, _allowed_amounts(row))
+
+
+def numbers_grounded_in(text: str | None, values) -> bool:
+    """Grounding check against an EXPLICIT set of allowed figures (totals, exposure, %,
+    per-row amounts …). Used by the run summary, which may legitimately cite any of them."""
+    allowed: set[str] = set()
+    for v in values:
+        try:
+            allowed.add(f"{abs(float(v)):.2f}")
+        except (TypeError, ValueError):
+            pass
+    return _grounded(text, allowed)
+
+
+def action_agrees(out: TriageOutput, row: dict) -> bool:
+    """True when the model's suggested action matches the engine's (engine always wins)."""
+    return out.suggested_action.value == row.get("action")
